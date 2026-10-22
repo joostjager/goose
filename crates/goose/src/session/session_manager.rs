@@ -816,7 +816,12 @@ pub struct SessionStorage {
     initialized: tokio::sync::OnceCell<()>,
     session_dir: PathBuf,
     action_required: Arc<crate::action_required_manager::ActionRequiredManager>,
+    #[cfg(test)]
+    after_commit: std::sync::Mutex<Option<PersistenceHook>>,
 }
+
+#[cfg(test)]
+type PersistenceHook = Box<dyn Fn(&'static str) -> Result<()> + Send + Sync>;
 
 pub(crate) fn role_to_string(role: &Role) -> &'static str {
     match role {
@@ -1049,6 +1054,22 @@ async fn insert_usage_ledger_row(
 }
 
 impl SessionStorage {
+    #[cfg(test)]
+    pub(crate) fn set_after_commit_hook(
+        &self,
+        hook: impl Fn(&'static str) -> Result<()> + Send + Sync + 'static,
+    ) {
+        *self.after_commit.lock().unwrap() = Some(Box::new(hook));
+    }
+
+    #[cfg(test)]
+    fn did_commit(&self, operation: &'static str) -> Result<()> {
+        if let Some(hook) = self.after_commit.lock().unwrap().as_ref() {
+            hook(operation)?;
+        }
+        Ok(())
+    }
+
     fn create_pool(path: &Path) -> Pool<Sqlite> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).expect("Failed to create session database directory");
@@ -1078,6 +1099,8 @@ impl SessionStorage {
             initialized: tokio::sync::OnceCell::new(),
             session_dir,
             action_required: Arc::new(crate::action_required_manager::ActionRequiredManager::new()),
+            #[cfg(test)]
+            after_commit: Default::default(),
         }
     }
 
@@ -1795,6 +1818,8 @@ impl SessionStorage {
             .await?;
 
         tx.commit().await?;
+        #[cfg(test)]
+        self.did_commit("create_session")?;
         #[cfg(feature = "telemetry")]
         crate::posthog::emit_session_started();
         Ok(session)
@@ -2001,6 +2026,8 @@ impl SessionStorage {
         }
 
         tx.commit().await?;
+        #[cfg(test)]
+        self.did_commit("apply_update")?;
         Ok(())
     }
 
@@ -2032,6 +2059,8 @@ impl SessionStorage {
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
+        #[cfg(test)]
+        self.did_commit("update_json_column")?;
         Ok(())
     }
 
@@ -2143,6 +2172,8 @@ impl SessionStorage {
             .await?;
 
         tx.commit().await?;
+        #[cfg(test)]
+        self.did_commit("add_message")?;
         Ok(())
     }
 
@@ -2192,7 +2223,10 @@ impl SessionStorage {
         conversation: &Conversation,
     ) -> Result<()> {
         let pool = self.pool().await?;
-        Self::replace_conversation_inner(pool, session_id, conversation).await
+        Self::replace_conversation_inner(pool, session_id, conversation).await?;
+        #[cfg(test)]
+        self.did_commit("replace_conversation")?;
+        Ok(())
     }
 
     async fn save_compacted_conversation(
@@ -2248,6 +2282,8 @@ impl SessionStorage {
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
+        #[cfg(test)]
+        self.did_commit("save_compacted_conversation")?;
         Ok(())
     }
 
@@ -2504,6 +2540,8 @@ impl SessionStorage {
             .await?;
 
         tx.commit().await?;
+        #[cfg(test)]
+        self.did_commit("delete_session")?;
         Ok(())
     }
 
@@ -2627,6 +2665,8 @@ impl SessionStorage {
         insert_usage_ledger_row(&mut tx, session_id, Some(model), ledger).await?;
 
         tx.commit().await?;
+        #[cfg(test)]
+        self.did_commit("record_usage_metrics")?;
         Ok(())
     }
 
@@ -2853,6 +2893,8 @@ impl SessionStorage {
         }
 
         tx.commit().await?;
+        #[cfg(test)]
+        self.did_commit("truncate_conversation_from_message")?;
         Ok(())
     }
 
@@ -2919,6 +2961,8 @@ impl SessionStorage {
         .await?;
 
         tx.commit().await?;
+        #[cfg(test)]
+        self.did_commit("update_message_metadata")?;
 
         Ok(())
     }
@@ -2962,6 +3006,8 @@ impl SessionStorage {
         }
 
         tx.commit().await?;
+        #[cfg(test)]
+        self.did_commit("update_tool_request_meta")?;
         Ok(())
     }
 }

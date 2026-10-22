@@ -166,6 +166,183 @@ async fn stream_messages(
     Ok(messages)
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("interrupted after persistence operation {0}")]
+struct PersistenceInterrupted(usize);
+
+struct GoalRun {
+    state: serde_json::Value,
+    writes: Vec<&'static str>,
+    checkpoint_consistent: bool,
+    provider_calls: usize,
+}
+
+fn goal_snapshot(session: &crate::session::Session) -> serde_json::Value {
+    let goal = crate::session::GoalState::of(session);
+    let messages: Vec<_> = session
+        .conversation
+        .as_ref()
+        .unwrap()
+        .messages()
+        .iter()
+        .filter(|message| !message.is_turn_context())
+        .map(|message| {
+            json!({
+                "role": message.role,
+                "text": message.as_concat_text(),
+                "user_visible": message.is_user_visible(),
+                "agent_visible": message.is_agent_visible(),
+                "nudged": message.metadata.operation_note("retry", "nudged"),
+            })
+        })
+        .collect();
+    json!({
+        "goal": goal.goal,
+        "grind": goal.grind,
+        "messages": messages,
+        "accumulated_output_tokens": session.accumulated_usage.output_tokens,
+    })
+}
+
+fn goal_checkpoint_consistent(session: &crate::session::Session) -> bool {
+    let messages = session.conversation.as_ref().unwrap().messages();
+    let command_hidden = messages.iter().any(|message| {
+        message.as_concat_text() == "/goal finish the migration" && !message.is_agent_visible()
+    });
+    let acknowledged = messages
+        .iter()
+        .any(|message| message.as_concat_text().starts_with("Goal set."));
+    let kickoff = messages.iter().any(|message| {
+        message
+            .as_concat_text()
+            .starts_with("Start working toward this goal now:")
+    });
+    let completed = messages
+        .iter()
+        .any(|message| message.as_concat_text() == "goal is met");
+    let goal = crate::session::GoalState::of(session).goal;
+    let goal_consistent = !(command_hidden || acknowledged || kickoff || goal.is_some())
+        || (command_hidden
+            && acknowledged
+            && kickoff
+            && (goal.as_deref() == Some("finish the migration") || completed));
+    // Without compaction, recorded output usage should all belong to saved responses.
+    let output_tokens: i32 = messages
+        .iter()
+        .filter_map(|message| message.metadata.usage.as_ref()?.output_tokens)
+        .sum();
+    goal_consistent && output_tokens == session.accumulated_usage.output_tokens.unwrap_or(0)
+}
+
+async fn run_goal_with_interruption(interrupt_after: Option<usize>) -> Result<GoalRun> {
+    let (agent, api, session_id, temp_dir) = agent_with_dummy_api().await?;
+    api.on("").reply("goal was not started");
+    api.on("Start working toward this goal now")
+        .reply("did some work");
+    api.on("fully met").reply("goal is met");
+    let writes = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded_writes = Arc::clone(&writes);
+    agent
+        .config
+        .session_manager
+        .storage()
+        .set_after_commit_hook(move |operation| {
+            let mut writes = recorded_writes.lock().unwrap();
+            writes.push(operation);
+            if interrupt_after == Some(writes.len()) {
+                return Err(PersistenceInterrupted(writes.len()).into());
+            }
+            Ok(())
+        });
+    let session_config = SessionConfig {
+        id: session_id.clone(),
+        schedule_id: None,
+        max_turns: Some(4),
+    };
+    let result = tokio::time::timeout(Duration::from_secs(10), async {
+        let stream = agent
+            .reply(
+                Message::user().with_text("/goal finish the migration"),
+                session_config.clone(),
+                None,
+            )
+            .await?;
+        stream_messages(stream).await
+    })
+    .await?;
+    match (interrupt_after, result) {
+        (None, Ok(_)) => {}
+        (Some(_), Err(error)) if error.is::<PersistenceInterrupted>() => {}
+        (_, Err(error)) => return Err(error),
+        (Some(index), Ok(_)) => anyhow::bail!("persistence operation {index} was not reached"),
+    }
+    // An error abandons the turn without invoking cancellation finalization.
+    drop(agent);
+
+    let session_manager = Arc::new(SessionManager::new(temp_dir.path().to_path_buf()));
+    let checkpoint = session_manager.get_session(&session_id, true).await?;
+    let checkpoint_consistent = goal_checkpoint_consistent(&checkpoint);
+    if interrupt_after.is_some() {
+        let restored =
+            agent_for_session(&api, session_manager.clone(), &session_id, temp_dir.path()).await?;
+        // Continue the saved turn without adding another user message or retaining its effects.
+        let stream = restored
+            .stream_state_machine_session(session_config, CancellationToken::new())
+            .await?;
+        tokio::time::timeout(Duration::from_secs(10), stream_messages(stream)).await??;
+    }
+    let session = session_manager.get_session(&session_id, true).await?;
+    let writes = writes.lock().unwrap().clone();
+    Ok(GoalRun {
+        state: goal_snapshot(&session),
+        writes,
+        checkpoint_consistent,
+        provider_calls: api.call_count(),
+    })
+}
+
+#[tokio::test]
+async fn goal_persistence_baseline() -> Result<()> {
+    let run = run_goal_with_interruption(None).await?;
+    assert!(run.checkpoint_consistent);
+    assert_eq!(run.provider_calls, 2);
+    assert!(run.state["goal"].is_null());
+    assert_eq!(run.state["messages"].as_array().unwrap().len(), 6);
+    let restored = run_goal_with_interruption(Some(run.writes.len())).await?;
+    assert!(restored.checkpoint_consistent);
+    assert_eq!(restored.state, run.state);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "prototype: exposes non-atomic persistence tracked in #13080"]
+async fn goal_continues_after_each_persistence_boundary() -> Result<()> {
+    let baseline = run_goal_with_interruption(None).await?;
+    let mut failures = Vec::new();
+    for index in 1..=baseline.writes.len() {
+        let run = run_goal_with_interruption(Some(index)).await?;
+        assert_eq!(run.writes, baseline.writes[..index]);
+        let differences: Vec<_> = baseline
+            .state
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(key, value)| run.state[*key] != **value)
+            .map(|(key, _)| key.as_str())
+            .collect();
+        let outcome = format!(
+            "after write {index} ({}): checkpoint consistent={}, differing fields={differences:?}, provider calls={}",
+            run.writes.last().unwrap(), run.checkpoint_consistent, run.provider_calls,
+        );
+        eprintln!("{outcome}");
+        if !run.checkpoint_consistent || !differences.is_empty() {
+            failures.push(outcome);
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    Ok(())
+}
+
 #[tokio::test]
 async fn state_machine_confirmation_through_agent_resumes_tool_call() -> Result<()> {
     let (mut agent, api, session_id, calculator, temp_dir) = agent_with_calculator().await?;
