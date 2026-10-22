@@ -32,6 +32,34 @@ use goose_providers::model::ModelConfig;
 
 async fn agent_with_dummy_api() -> Result<(Arc<Agent>, Arc<DummyApi>, String, tempfile::TempDir)> {
     let api = Arc::new(DummyApi::start(ProviderFeatures::default()).await);
+    let temp_dir = tempfile::tempdir()?;
+    let session_manager = Arc::new(SessionManager::new(temp_dir.path().to_path_buf()));
+    let session = session_manager
+        .create_session(
+            temp_dir.path().to_path_buf(),
+            "state-machine-reply".to_string(),
+            SessionType::Hidden,
+            GooseMode::Auto,
+        )
+        .await?;
+    let agent = agent_for_session(&api, session_manager, &session.id, temp_dir.path()).await?;
+    agent
+        .switch_provider(
+            &session.id,
+            "openai",
+            ModelConfig::new(goose_providers::openai::OPEN_AI_DEFAULT_MODEL)
+                .with_canonical_limits("openai"),
+        )
+        .await?;
+    Ok((agent, api, session.id, temp_dir))
+}
+
+async fn agent_for_session(
+    api: &DummyApi,
+    session_manager: Arc<SessionManager>,
+    session_id: &str,
+    data_dir: &std::path::Path,
+) -> Result<Arc<Agent>> {
     let api_client = goose_providers::api_client::ApiClient::new_with_tls(
         api.uri(),
         goose_providers::api_client::AuthMethod::NoAuth,
@@ -45,33 +73,19 @@ async fn agent_with_dummy_api() -> Result<(Arc<Agent>, Arc<DummyApi>, String, te
             .build(),
     );
 
-    let temp_dir = tempfile::tempdir()?;
-    let session_manager = Arc::new(SessionManager::new(temp_dir.path().to_path_buf()));
-    let session = session_manager
-        .create_session(
-            temp_dir.path().to_path_buf(),
-            "state-machine-reply".to_string(),
-            SessionType::Hidden,
-            GooseMode::Auto,
-        )
-        .await?;
     let agent = Agent::with_config(AgentConfig::new(
         session_manager,
-        Arc::new(PermissionManager::new(temp_dir.path().join("permissions"))),
+        Arc::new(PermissionManager::new(data_dir.join("permissions"))),
         None,
         true,
         GoosePlatform::GooseCli,
     ));
     agent
-        .update_provider(
-            provider,
-            ModelConfig::new(goose_providers::openai::OPEN_AI_DEFAULT_MODEL)
-                .with_canonical_limits("openai"),
-            &session.id,
-        )
-        .await?;
-
-    Ok((agent, api, session.id, temp_dir))
+        .config
+        .providers
+        .set_provider(session_id, provider)
+        .await;
+    Ok(agent)
 }
 
 async fn agent_with_calculator() -> Result<(
