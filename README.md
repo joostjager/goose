@@ -38,6 +38,84 @@ Or install the CLI:
 curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh | bash
 ```
 
+# Architecture
+
+Arrows mean “uses.” Select a component or capability to open its source or documentation. The assembled agent lists the capabilities integrated within goose; MCP servers, skills, and plugins are extension inputs that may come from external projects.
+
+Blue boxes are Goose interfaces and the assembled agent; green marks extracted libraries; purple marks extension inputs; gray with dashed borders marks applications and inference engines outside this repository.
+
+```mermaid
+%%{init: {"theme":"dark","themeVariables":{"background":"#101928","edgeLabelBackground":"#101928","lineColor":"#8799b5","fontFamily":"Inter, system-ui, sans-serif"},"flowchart":{"wrappingWidth":460}}}%%
+flowchart TB
+    subgraph APPS["Applications"]
+        Desktop["goose desktop"]:::owned
+        Buzz["Buzz"]:::community
+        Berd["Berd"]:::community
+        Other["Applications …"]:::community
+    end
+
+    ACP["Goose ACP server"]:::owned
+    CLI["goose CLI"]:::owned
+    Bindings["Python / Kotlin bindings<br/><br/>UniFFI"]:::owned
+    Desktop --> ACP
+    Buzz --> ACP
+    Berd --> ACP
+    Other --> ACP
+    Other --> Agent
+    Other --> Bindings
+    ACP --> Agent
+    CLI --> Agent
+
+    MCP["MCP servers"]:::standard
+    SkillFiles["Skills"]:::standard
+    PluginPackages["Plugins"]:::standard
+    Agent --> MCP
+    Agent --> SkillFiles
+    Agent --> PluginPackages
+
+    Agent["`<a href='https://github.com/aaif-goose/goose/blob/main/crates/goose/src/agents/agent.rs' target='_blank'>Assembled Goose agent</a><br/><br/><a href='https://github.com/aaif-goose/goose/blob/main/crates/goose/src/agents/state_machine_builder.rs' target='_blank'>Operation pipeline</a> · <a href='https://github.com/aaif-goose/goose/tree/main/crates/goose/src/permission' target='_blank'>approvals</a> · <a href='https://github.com/aaif-goose/goose/tree/main/crates/goose/src/hooks' target='_blank'>hooks</a> · <a href='https://github.com/aaif-goose/goose/blob/main/crates/goose/src/agents/state_machine/ops_retry.rs' target='_blank'>retries</a> · <a href='https://github.com/aaif-goose/goose/blob/main/crates/goose/src/agents/state_machine/ops_steer.rs' target='_blank'>steering</a> · <a href='https://github.com/aaif-goose/goose/tree/main/crates/goose/src/session' target='_blank'>sessions &amp; persistence</a> · <a href='https://github.com/aaif-goose/goose/tree/main/crates/goose/src/agents/extension_manager' target='_blank'>tools, extensions &amp; MCP connections</a> · <a href='https://github.com/aaif-goose/goose/blob/main/crates/goose/src/agents/platform_extensions/code_execution.rs' target='_blank'>Code Mode</a> · <a href='https://github.com/aaif-goose/goose/tree/main/crates/goose/src/skills' target='_blank'>skill integration</a> · <a href='https://github.com/aaif-goose/goose/tree/main/crates/goose/src/plugins' target='_blank'>plugin integration</a> · <a href='https://github.com/aaif-goose/goose/blob/main/crates/goose/src/agents/subagent_handler.rs' target='_blank'>subagent lifecycle</a> · <a href='https://github.com/aaif-goose/goose/blob/main/crates/goose/src/agents/provider_manager.rs' target='_blank'>provider configuration</a> · <a href='https://github.com/aaif-goose/goose/tree/main/crates/goose/src/oauth' target='_blank'>sign-in</a> · <a href='https://github.com/aaif-goose/goose/tree/main/crates/goose/src/live_voice' target='_blank'>live voice</a> · <a href='https://github.com/aaif-goose/goose/blob/main/crates/goose/src/agents/gen_ai_telemetry.rs' target='_blank'>telemetry</a>`"]:::owned
+
+    Loop["Agent loop<br/><br/>State machine · inference / tool machinery<br/>Subagent machinery · skill utilities"]:::extracted
+    Compaction["Compaction"]:::extracted
+    Providers["Providers<br/><br/>Model implementations · request logging<br/>Realtime / voice provider adapters"]:::extracted
+    Local["Local inference engines"]:::extracted
+    Eredu["eredu<br/><br/>Local model runtime"]:::community
+    Mesh["Mesh LLM<br/><br/>Distributed inference"]:::community
+
+    Agent --> Loop
+    Agent --> Compaction
+    Agent --> Providers
+    Providers --> Local
+    Local --> Eredu
+    Providers --> Mesh
+
+    Bindings --> Providers
+    Bindings --> Compaction
+
+    click Buzz href "https://github.com/block/buzz-app" _blank
+    click Berd href "https://github.com/block/berd" _blank
+    click Desktop href "https://github.com/aaif-goose/goose/tree/main/ui/desktop" _blank
+    click ACP href "https://github.com/aaif-goose/goose/tree/main/crates/goose/src/acp" _blank
+    click CLI href "https://github.com/aaif-goose/goose/tree/main/crates/goose-cli" _blank
+    click Bindings href "https://github.com/aaif-goose/goose/tree/main/crates/goose-sdk" _blank
+    click Loop href "https://github.com/aaif-goose/goose/tree/main/crates/goose-agent" _blank
+    click Compaction href "https://github.com/aaif-goose/goose/tree/main/crates/goose-context-management" _blank
+    click Providers href "https://github.com/aaif-goose/goose/tree/main/crates/goose-providers" _blank
+    click Local href "https://github.com/aaif-goose/goose/tree/main/crates/goose-local-inference" _blank
+    click MCP href "https://modelcontextprotocol.io/" _blank
+    click SkillFiles href "https://agentskills.io/specification" _blank
+    click PluginPackages href "https://github.com/aaif-goose/goose/tree/main/crates/goose/src/plugins" _blank
+    click Mesh href "https://github.com/Mesh-LLM/mesh-llm/" _blank
+    click Eredu href "https://github.com/jbg/eredu" _blank
+
+    classDef owned fill:#193552,stroke:#6395c4,color:#e2eaf4,stroke-width:1px
+    classDef community fill:#30343c,stroke:#9099a7,color:#e3e7ed,stroke-width:1px,stroke-dasharray:5 4
+    classDef extracted fill:#203e2d,stroke:#73a889,color:#dfede3,stroke-width:1px
+    classDef standard fill:#382449,stroke:#ae83c2,color:#eadff0,stroke-width:1px
+    style APPS fill:transparent,stroke:transparent
+    linkStyle default stroke:#8799b5,color:#d3dded
+```
+
 # Quick links
 - [Quickstart](https://goose-docs.ai/docs/quickstart)
 - [Installation](https://goose-docs.ai/docs/getting-started/installation)
